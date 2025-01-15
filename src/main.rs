@@ -3,18 +3,33 @@
 //! This code is intentially inefficient in some parts
 //! as it is intended as a task.
 
-use std::{hint::black_box, io::IoSlice, thread, time::Duration};
+use std::{hint::black_box, io::IoSlice, marker::PhantomData, thread, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, thread_rng, Rng as _};
 
 const MAX_MSG_SIZE: usize = 1400;
 
-struct Sender {
+// We need to specify that the lifetime of the items in the buffer don't depend on the struct
+// `Sender` itself. We can achieve that by either setting that the struct outlive the data in the
+// buffer, or that the data outlive the struct itself.
+
+// Define that data in buffer will outlive the `Sender` struct.
+struct Sender<'a, 'b: 'a> {
     id: usize,
+    buffer: Vec<IoSlice<'b>>,
+    phantom: PhantomData<&'a str>,
 }
 
-impl Sender {
+// NOTE: This also works with changing the life time in `send_payloads()` function to `'a`.
+// Define that `Sender` struct will outlive data in buffer.
+// struct Sender<'a, 'b: 'a> {
+//     id: usize,
+//     buffer: Vec<IoSlice<'a>>,
+//     phantom: PhantomData<&'b str>,
+// }
+
+impl<'a, 'b: 'a> Sender<'a, 'b> {
     /// Send payloads.
     ///
     /// We want to send payloads grouped together to messages.
@@ -22,25 +37,25 @@ impl Sender {
     /// To avoid extra allocations, we are creating `IoSlice` of buffers.
     /// The number and size of payloads passed as an iterator is random,
     /// so we have to dynamically "grow" a message until it cannot grow further.
-    fn send_payloads<'data>(&mut self, payloads: impl Iterator<Item = &'data Bytes>) {
-        let mut iovs = Vec::new();
+    fn send_payloads(&mut self, payloads: impl Iterator<Item = &'b Bytes>) {
+        self.buffer.clear();
 
         let mut payloads = payloads.peekable();
 
         while payloads.peek().is_some() {
-            iovs.clear();
+            self.buffer.clear();
             let mut msg_size = 0;
 
             'msg_growing: while let Some(next_payload) = payloads.peek() {
                 if msg_size + next_payload.len() < MAX_MSG_SIZE {
                     msg_size += next_payload.len();
-                    iovs.push(IoSlice::new(payloads.next().unwrap()));
+                    self.buffer.push(IoSlice::new(payloads.next().unwrap()));
                 } else {
                     break 'msg_growing;
                 }
             }
 
-            black_box(send_msg(iovs.as_slice()));
+            black_box(send_msg(self.buffer.as_slice()));
         }
     }
 }
@@ -54,7 +69,11 @@ fn main() {
         .collect();
     let num_payloads_sampler = Uniform::new(5, 10);
 
-    let mut sender = Sender { id: 1 };
+    let mut sender = Sender {
+        id: 1,
+        buffer: Vec::new(),
+        phantom: PhantomData,
+    };
 
     loop {
         // Choose a random set of payloads to pass to `send_payloads`.
