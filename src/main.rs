@@ -10,6 +10,41 @@ use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom, thre
 
 const MAX_MSG_SIZE: usize = 1400;
 
+struct Sender {
+    id: usize,
+}
+
+impl Sender {
+    /// Send payloads.
+    ///
+    /// We want to send payloads grouped together to messages.
+    /// The total size of a message must not be larger than [MAX_MSG_SIZE].
+    /// To avoid extra allocations, we are creating `IoSlice` of buffers.
+    /// The number and size of payloads passed as an iterator is random,
+    /// so we have to dynamically "grow" a message until it cannot grow further.
+    fn send_payloads<'data>(&mut self, payloads: impl Iterator<Item = &'data Bytes>) {
+        let mut iovs = Vec::new();
+
+        let mut payloads = payloads.peekable();
+
+        while payloads.peek().is_some() {
+            iovs.clear();
+            let mut msg_size = 0;
+
+            'msg_growing: while let Some(next_payload) = payloads.peek() {
+                if msg_size + next_payload.len() < MAX_MSG_SIZE {
+                    msg_size += next_payload.len();
+                    iovs.push(IoSlice::new(payloads.next().unwrap()));
+                } else {
+                    break 'msg_growing;
+                }
+            }
+
+            black_box(send_msg(iovs.as_slice()));
+        }
+    }
+}
+
 fn main() {
     // Generate random payloads upfront to emulate incoming data
     // without causing a visible footprint in the profiling.
@@ -19,44 +54,16 @@ fn main() {
         .collect();
     let num_payloads_sampler = Uniform::new(5, 10);
 
+    let mut sender = Sender { id: 1 };
+
     loop {
         // Choose a random set of payloads to pass to `send_payloads`.
         let num_payloads = num_payloads_sampler.sample(&mut thread_rng());
         let random_payloads = payloads.choose_multiple(&mut thread_rng(), num_payloads);
-
-        send_payloads(random_payloads);
+        sender.send_payloads(random_payloads);
 
         // Sleep to throttle the binary a bit.
         thread::sleep(Duration::from_nanos(100));
-    }
-}
-
-/// Send payloads.
-///
-/// We want to send payloads grouped together to messages.
-/// The total size of a message must not be larger than [MAX_MSG_SIZE].
-/// To avoid extra allocations, we are creating `IoSlice` of buffers.
-/// The number and size of payloads passed as an iterator is random,
-/// so we have to dynamically "grow" a message until it cannot grow further.
-fn send_payloads<'a>(payloads: impl Iterator<Item = &'a Bytes>) {
-    let mut payloads = payloads.peekable();
-
-    let mut iovs = Vec::new();
-
-    while payloads.peek().is_some() {
-        iovs.clear();
-        let mut msg_size = 0;
-
-        'msg_growing: while let Some(next_payload) = payloads.peek() {
-            if msg_size + next_payload.len() < MAX_MSG_SIZE {
-                msg_size += next_payload.len();
-                iovs.push(IoSlice::new(payloads.next().unwrap()));
-            } else {
-                break 'msg_growing;
-            }
-        }
-
-        black_box(send_msg(iovs.as_slice()));
     }
 }
 
