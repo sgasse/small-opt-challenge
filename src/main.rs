@@ -19,12 +19,14 @@ fn main() {
         .collect();
     let num_payloads_sampler = Uniform::new(5, 10);
 
+    let mut iovs = Vec::new();
+
     loop {
         // Choose a random set of payloads to pass to `send_payloads`.
         let num_payloads = num_payloads_sampler.sample(&mut thread_rng());
         let random_payloads = payloads.choose_multiple(&mut thread_rng(), num_payloads);
 
-        send_payloads(random_payloads);
+        send_payloads(random_payloads, &mut iovs);
 
         // Sleep to throttle the binary a bit.
         thread::sleep(Duration::from_nanos(100));
@@ -38,10 +40,11 @@ fn main() {
 /// To avoid extra allocations, we are creating `IoSlice` of buffers.
 /// The number and size of payloads passed as an iterator is random,
 /// so we have to dynamically "grow" a message until it cannot grow further.
-fn send_payloads<'a>(payloads: impl Iterator<Item = &'a Bytes>) {
+fn send_payloads<'a, 'b>(payloads: impl Iterator<Item = &'a Bytes>, iovs: &mut Vec<IoSlice<'b>>)
+where
+    'a: 'b,
+{
     let mut payloads = payloads.peekable();
-
-    let mut iovs = Vec::new();
 
     while payloads.peek().is_some() {
         iovs.clear();
