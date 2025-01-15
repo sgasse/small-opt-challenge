@@ -12,6 +12,7 @@ const MAX_MSG_SIZE: usize = 1400;
 
 struct Sender {
     id: usize,
+    iovs: Option<Vec<IoSlice<'static>>>,
 }
 
 impl Sender {
@@ -23,7 +24,13 @@ impl Sender {
     /// The number and size of payloads passed as an iterator is random,
     /// so we have to dynamically "grow" a message until it cannot grow further.
     fn send_payloads<'data>(&mut self, payloads: impl Iterator<Item = &'data Bytes>) {
-        let mut iovs = Vec::new();
+        // Take the vector out of the option (or initialize on first execution),
+        // recycle to our target type with another lifetime.
+        let mut iovs = self
+            .iovs
+            .take()
+            .map(recycle_vec)
+            .unwrap_or_else(|| Vec::with_capacity(100));
 
         let mut payloads = payloads.peekable();
 
@@ -42,6 +49,9 @@ impl Sender {
 
             black_box(send_msg(iovs.as_slice()));
         }
+
+        // Recycle the vector, reusing the allocation.
+        self.iovs = Some(recycle_vec(iovs));
     }
 }
 
@@ -54,7 +64,7 @@ fn main() {
         .collect();
     let num_payloads_sampler = Uniform::new(5, 10);
 
-    let mut sender = Sender { id: 1 };
+    let mut sender = Sender { id: 1, iovs: None };
 
     loop {
         // Choose a random set of payloads to pass to `send_payloads`.
@@ -82,4 +92,13 @@ fn random_payload(min_size: usize, max_size: usize) -> Bytes {
     let mut buf = BytesMut::with_capacity(cap);
     thread_rng().fill(&mut buf[..]);
     buf.freeze()
+}
+
+/// Pass the allocations from one vector to another.
+fn recycle_vec<T, U>(mut buffer: Vec<T>) -> Vec<U> {
+    // Clear all elements so that `map` will not run on any element.
+    buffer.clear();
+    // Use `into_iter().collect()` to pass the backing allocations from one
+    // vector to another.
+    buffer.into_iter().map(|_| unreachable!()).collect()
 }
